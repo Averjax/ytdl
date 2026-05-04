@@ -26,7 +26,7 @@ jobs:
       - name: Download video (720p, native downloader)
         run: |
           mkdir -p videos
-          yt-dlp -f "best[height<=720]" \
+          yt-dlp -f "best[height<=1080]" \
                  --downloader native \
                  -o "videos/${{ github.event.inputs.filename }}.%(ext)s" \
                  "${{ github.event.inputs.video_url }}"

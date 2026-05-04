@@ -1,0 +1,101 @@
+name: Download YouTube Video (Auto-Refresh Cookies)
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'YouTube Video URL'
+        required: true
+      quality:
+        description: 'Video Height (e.g., 1080, 720, 480)'
+        required: true
+        default: '720'
+      filename_override:
+        description: 'Optional: Custom output filename (without extension). If left empty, title will be used.'
+        required: false
+        default: ''
+permissions:
+  contents: write
+
+jobs:
+  download-and-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup yt-dlp
+        uses: AnimMouse/setup-yt-dlp@v3
+
+      - name: Setup yt-dlp YouTube cookies
+        uses: AnimMouse/setup-yt-dlp/cookies@v3
+        with:
+          cookies: ${{ secrets.YOUTUBE_COOKIES }}
+
+      - name: Extract Video Title
+        id: extract_title
+        run: |
+          RAW_TITLE=$(yt-dlp --skip-download --print title "${{ github.event.inputs.video_url }}")
+          if [ -n "${{ github.event.inputs.filename_override }}" ]; then
+            FINAL_FILENAME="${{ github.event.inputs.filename_override }}"
+          else
+            FINAL_FILENAME=$(echo "$RAW_TITLE" | sed 's/[:\/\\*?"<>|]/_/g' | tr ' ' '_')
+          fi
+          echo "filename=$FINAL_FILENAME" >> $GITHUB_OUTPUT
+
+      - name: Reset videos folder (Fresh Start)
+        run: |
+          rm -rf videos
+          mkdir -p videos
+
+      - name: Download video (Custom Quality)
+        run: |
+          QUALITY_HEIGHT="${{ github.event.inputs.quality }}"
+          yt-dlp -f "best[height<=${QUALITY_HEIGHT}]" \
+                 --downloader native \
+                 -o "videos/${{ steps.extract_title.outputs.filename }}.%(ext)s" \
+                 "${{ github.event.inputs.video_url }}"
+
+      - name: Split video into chunks
+        run: |
+          cd videos
+          FINAL_NAME="${{ steps.extract_title.outputs.filename }}"
+          
+          if [ -f "${FINAL_NAME}.mp4" ]; then
+            ORIGINAL="${FINAL_NAME}.mp4"
+            EXT="mp4"
+          elif [ -f "${FINAL_NAME}.mkv" ]; then
+            ORIGINAL="${FINAL_NAME}.mkv"
+            EXT="mkv"
+          elif [ -f "${FINAL_NAME}.webm" ]; then
+            ORIGINAL="${FINAL_NAME}.webm"
+            EXT="webm"
+          else
+            echo "No video file found to split."
+            exit 1
+          fi
+
+          split -b 95M "$ORIGINAL" "${FINAL_NAME}_part_"
+          rm "$ORIGINAL"
+          
+          echo '#!/bin/bash' > reassemble.sh
+          echo "cat ${FINAL_NAME}_part_* > ${FINAL_NAME}.${EXT}" >> reassemble.sh
+          echo 'echo "Reassembled: ${FINAL_NAME}.${EXT}"' >> reassemble.sh
+          chmod +x reassemble.sh
+          
+          cd ..
+
+      - name: Commit and push chunks
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "actions@github.com"
+          
+          # Always add, commit, and push. Git will handle "nothing to commit" gracefully.
+          git add videos/
+          git commit -m "Add video: ${{ steps.extract_title.outputs.filename }} (split)" || echo "No changes to commit"
+          git push
+          
+      - name: Update yt-dlp YouTube cookies
+        uses: AnimMouse/setup-yt-dlp/cookies/update@v3
+        with:
+          cookies_secret_name: YOUTUBE_COOKIES
+          token: ${{ secrets.GH_PAT }}

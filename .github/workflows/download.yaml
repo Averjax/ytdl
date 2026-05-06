@@ -27,8 +27,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GH_PAT }}
+        # No custom token – uses default GITHUB_TOKEN with contents: write
 
       - name: Setup yt-dlp
         uses: AnimMouse/setup-yt-dlp@v3
@@ -41,16 +40,15 @@ jobs:
       - name: Download Media
         run: |
           mkdir -p download
-          # Force a known file extension and format
           if [ "${{ github.event.inputs.audio_only }}" = "true" ]; then
-            # Audio only: extract audio as MP3
+            # Audio only: extract as MP3
             yt-dlp -x --audio-format mp3 \
                    --restrict-filenames \
                    -o "download/temp_file.mp3" \
                    "${{ github.event.inputs.video_url }}"
             EXT="mp3"
           else
-            # Video: remux to MP4 (fast, no re-encoding)
+            # Video: remux to MP4
             yt-dlp -f "best[height<=${{ github.event.inputs.quality }}]" \
                    --remux-video mp4 \
                    --restrict-filenames \
@@ -90,7 +88,7 @@ jobs:
             split -b 95M "full_media.${EXT}" "${TITLE}_part_"
             rm "full_media.${EXT}"
             
-            # Windows BAT merge script (no heredoc)
+            # Windows BAT merge script (safe echo commands, no heredoc)
             echo '@echo off' > merge.bat
             echo "echo Reassembling $TITLE..." >> merge.bat
             echo "copy /b ${TITLE}_part_* \"$TITLE.$EXT\"" >> merge.bat

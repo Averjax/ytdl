@@ -27,7 +27,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        # No custom token – uses default GITHUB_TOKEN with contents: write
 
       - name: Setup yt-dlp
         uses: AnimMouse/setup-yt-dlp@v3
@@ -63,10 +62,19 @@ jobs:
           CLEAN_TITLE=$(yt-dlp --get-title --restrict-filenames "${{ github.event.inputs.video_url }}")
           echo "CLEAN_TITLE=$CLEAN_TITLE" >> $GITHUB_ENV
 
+      - name: Sanitize title for Windows compatibility
+        run: |
+          # Replace characters invalid on Windows: \ / : * ? " < > |
+          SANITIZED_TITLE=$(echo "${{ env.CLEAN_TITLE }}" | sed 's/[\\/:*?"<>|]/_/g')
+          # Also remove trailing spaces or dots
+          SANITIZED_TITLE=$(echo "$SANITIZED_TITLE" | sed 's/[ .]$//')
+          echo "SANITIZED_TITLE=$SANITIZED_TITLE" >> $GITHUB_ENV
+          echo "Sanitized title: $SANITIZED_TITLE"
+
       - name: Process and Split
         run: |
           cd download
-          TITLE="${{ env.CLEAN_TITLE }}"
+          TITLE="${{ env.SANITIZED_TITLE }}"
           EXT="${{ env.EXTENSION }}"
           FILE="temp_file.${EXT}"
           
@@ -104,5 +112,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
           git add download/
-          git commit -m "Add ${{ env.CLEAN_TITLE }}" || echo "No changes to commit"
+          git commit -m "Add ${{ env.SANITIZED_TITLE }}" || echo "No changes to commit"
           git push

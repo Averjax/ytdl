@@ -85,19 +85,12 @@ jobs:
           
           if [ $SIZE -gt 99614720 ]; then
             echo "File exceeds 95MB, splitting..."
-            split -b 95M "full_media.${EXT}" "${TITLE}_part_"
+            split -b 95M "full_media.${EXT}" "vid_part_"
             rm "full_media.${EXT}"
-            
-            # Windows BAT merge script (safe echo commands, no heredoc)
-            echo '@echo off' > merge.bat
-            echo "echo Reassembling $TITLE..." >> merge.bat
-            echo "copy /b ${TITLE}_part_* \"$TITLE.$EXT\"" >> merge.bat
-            echo "echo Done!" >> merge.bat
-            echo "pause" >> merge.bat
             
             # Linux Bash reassemble script
             echo '#!/bin/bash' > reassemble.sh
-            echo "cat ${TITLE}_part_* > \"$TITLE.$EXT\"" >> reassemble.sh
+            echo "cat vid_part_* > \"$TITLE.$EXT\" && rm -f vid_part_*" >> reassemble.sh
             chmod +x reassemble.sh
           else
             mv "full_media.${EXT}" "$TITLE.$EXT"

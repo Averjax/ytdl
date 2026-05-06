@@ -1,112 +1,98 @@
-name: Download YouTube Videos (Multi-Download & Zip)
+name: Download YouTube Videos (Pro)
 on:
   workflow_dispatch:
     inputs:
       video_urls:
-        description: 'YouTube Video URLs (comma-separated for multiple)'
+        description: 'Paste URLs here (separate multiple links with a comma)'
         required: true
+        default: 'link1, link2'
       quality:
-        description: 'Video Height (e.g., 1080, 720, 480) - Ignored if Audio Only'
+        description: 'Select Video Quality'
+        type: choice
         required: true
         default: '720'
+        options:
+          - '1080'
+          - '720'
+          - '480'
+          - '360'
       download_audio_only:
-        description: 'Download Audio Only?'
+        description: 'Download Audio Only (MP3)?'
         type: boolean
         default: false
-      filename_prefix:
-        description: 'Optional: Prefix for filenames'
-        required: false
-        default: ''
 
 permissions:
   contents: write
 
 jobs:
-  download-process:
+  download:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup yt-dlp
+      - name: Setup Tools
         uses: AnimMouse/setup-yt-dlp@v3
 
-      - name: Setup yt-dlp YouTube cookies
+      - name: Setup Cookies
         uses: AnimMouse/setup-yt-dlp/cookies@v3
         with:
           cookies: ${{ secrets.YOUTUBE_COOKIES }}
 
-      - name: Create Downloads Folder
-        run: mkdir -p downloads
-
-      - name: Process Videos
+      - name: Process URLs
         run: |
-          # Convert comma-separated string into an array
+          mkdir -p downloads
+          
+          # Convert the comma-separated input into a loop-friendly list
           IFS=',' read -ra ADDR <<< "${{ github.event.inputs.video_urls }}"
           
           for url in "${ADDR[@]}"; do
-            url=$(echo "$url" | xargs) # trim whitespace
-            echo "Processing: $url"
+            # Trim any accidental spaces around the URL
+            url=$(echo "$url" | xargs)
+            [ -z "$url" ] && continue
             
-            # 1. Get Title and Format
-            RAW_TITLE=$(yt-dlp --skip-download --get-title "$url")
-            CLEAN_TITLE=$(echo "$RAW_TITLE" | sed 's/[:\/\\*?"<>|]/_/g' | tr ' ' '_')
+            echo "Starting: $url"
             
-            # Set Format and Extension
+            # Get video title for the folder name
+            TITLE=$(yt-dlp --get-title "$url" | sed 's/[:\/\\*?"<>|]/_/g')
+            mkdir -p "work_$TITLE"
+            
+            # Set format based on user choice
             if [ "${{ github.event.inputs.download_audio_only }}" = "true" ]; then
-              FORMAT="bestaudio"
+              YT_FORMAT="bestaudio"
               EXT="mp3"
             else
-              FORMAT="best[height<=${{ github.event.inputs.quality }}]"
+              YT_FORMAT="best[height<=${{ github.event.inputs.quality }}]"
               EXT="mp4"
             fi
-            
-            # 2. Create temp workspace for this specific video
-            mkdir -p "temp_$CLEAN_TITLE"
-            
-            # 3. Download
-            yt-dlp -f "$FORMAT" \
-                   --downloader native \
+
+            # Download
+            yt-dlp -f "$YT_FORMAT" \
                    --extract-audio --audio-format "$EXT" --audio-quality 0 \
-                   --add-metadata \
-                   -o "temp_$CLEAN_TITLE/original.$EXT" \
-                   "$url" || true # Continue even if one fails
-            
-            # Identify the actual file (yt-dlp might change extension)
-            DOWNLOADED_FILE=$(find "temp_$CLEAN_TITLE" -type f | head -n 1)
-            ACTUAL_EXT="${DOWNLOADED_FILE##*.}"
-            
-            # 4. Split into chunks (95MB)
-            cd "temp_$CLEAN_TITLE"
-            split -b 95M "original.$ACTUAL_EXT" "part_"
-            rm "original.$ACTUAL_EXT"
-            
-            # 5. Create Reassembly Scripts
-            # Linux/Mac
-            echo -e "#!/bin/bash\ncat part_* > \"$CLEAN_TITLE.$ACTUAL_EXT\"\necho 'Video Reassembled!'" > reassemble.sh
-            chmod +x reassemble.sh
-            # Windows
-            echo -e "@echo off\ncopy /b part_* \"$CLEAN_TITLE.$ACTUAL_EXT\"\necho Video Reassembled!" > reassemble.bat
+                   -o "work_$TITLE/video.$EXT" \
+                   "$url" || continue
+
+            # Split into 95MB chunks to avoid GitHub's 100MB limit
+            cd "work_$TITLE"
+            split -b 95M "video.$EXT" "part_"
+            rm "video.$EXT"
+
+            # Create Reassemble Scripts
+            echo "cat part_* > \"$TITLE.$EXT\"" > reassemble.sh
+            echo "@echo off" > reassemble.bat
+            echo "copy /b part_* \"$TITLE.$EXT\"" >> reassemble.bat
             
             cd ..
             
-            # 6. Zip it up and move to downloads
-            zip -j "downloads/${CLEAN_TITLE}.zip" "temp_$CLEAN_TITLE/"*
-            
-            # Cleanup temp
-            rm -rf "temp_$CLEAN_TITLE"
+            # Zip everything and move to the final downloads folder
+            zip -j "downloads/${TITLE}.zip" "work_$TITLE/"*
+            rm -rf "work_$TITLE"
           done
 
-      - name: Commit and push
+      - name: Push to Repository
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
           git add downloads/
-          git commit -m "Add videos: ${{ github.event.inputs.video_urls }}" || echo "No changes"
+          git commit -m "Uploaded requested videos" || exit 0
           git push
-
-      - name: Update yt-dlp YouTube cookies
-        uses: AnimMouse/setup-yt-dlp/cookies/update@v3
-        with:
-          cookies_secret_name: YOUTUBE_COOKIES
-          token: ${{ secrets.GH_PAT }}

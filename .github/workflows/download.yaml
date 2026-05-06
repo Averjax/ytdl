@@ -1,11 +1,10 @@
-name: Download YouTube Videos (Pro)
+name: Download YouTube Videos (Fixed & Optimized)
 on:
   workflow_dispatch:
     inputs:
       video_urls:
-        description: 'Paste URLs here (separate multiple links with a comma)'
+        description: 'Paste URLs (separate with a comma)'
         required: true
-        default: 'link1, link2'
       quality:
         description: 'Select Video Quality'
         type: choice
@@ -15,7 +14,6 @@ on:
           - '1080'
           - '720'
           - '480'
-          - '360'
       download_audio_only:
         description: 'Download Audio Only (MP3)?'
         type: boolean
@@ -39,52 +37,54 @@ jobs:
         with:
           cookies: ${{ secrets.YOUTUBE_COOKIES }}
 
-      - name: Process URLs
+      - name: Process Videos
         run: |
           mkdir -p downloads
-          
-          # Convert the comma-separated input into a loop-friendly list
           IFS=',' read -ra ADDR <<< "${{ github.event.inputs.video_urls }}"
           
           for url in "${ADDR[@]}"; do
-            # Trim any accidental spaces around the URL
             url=$(echo "$url" | xargs)
             [ -z "$url" ] && continue
             
-            echo "Starting: $url"
+            echo "Processing: $url"
             
-            # Get video title for the folder name
-            TITLE=$(yt-dlp --get-title "$url" | sed 's/[:\/\\*?"<>|]/_/g')
+            # Get clean title
+            TITLE=$(yt-dlp --get-title "$url" | sed 's/[:\/\\*?"<>|]/_/g' || echo "video_$(date +%s)")
             mkdir -p "work_$TITLE"
             
-            # Set format based on user choice
             if [ "${{ github.event.inputs.download_audio_only }}" = "true" ]; then
-              YT_FORMAT="bestaudio"
-              EXT="mp3"
+              # AUDIO ONLY PATH
+              yt-dlp -f "bestaudio" \
+                     --extract-audio --audio-format mp3 --audio-quality 0 \
+                     -o "work_$TITLE/file.mp3" "$url"
+              FILE_EXT="mp3"
             else
-              YT_FORMAT="best[height<=${{ github.event.inputs.quality }}]"
-              EXT="mp4"
+              # VIDEO PATH
+              yt-dlp -f "bestvideo[height<=${{ github.event.inputs.quality }}]+bestaudio/best[height<=${{ github.event.inputs.quality }}]" \
+                     --merge-output-format mp4 \
+                     -o "work_$TITLE/file.mp4" "$url"
+              FILE_EXT="mp4"
             fi
 
-            # Download
-            yt-dlp -f "$YT_FORMAT" \
-                   --extract-audio --audio-format "$EXT" --audio-quality 0 \
-                   -o "work_$TITLE/video.$EXT" \
-                   "$url" || continue
+            # Check if download actually succeeded
+            if [ ! -f "work_$TITLE/file.$FILE_EXT" ]; then
+              echo "Download failed for $url, skipping..."
+              rm -rf "work_$TITLE"
+              continue
+            fi
 
-            # Split into 95MB chunks to avoid GitHub's 100MB limit
+            # Split, Script, and Zip
             cd "work_$TITLE"
-            split -b 95M "video.$EXT" "part_"
-            rm "video.$EXT"
-
-            # Create Reassemble Scripts
-            echo "cat part_* > \"$TITLE.$EXT\"" > reassemble.sh
+            split -b 95M "file.$FILE_EXT" "part_"
+            rm "file.$FILE_EXT"
+            
+            # Linux reassemble
+            echo "cat part_* > \"$TITLE.$FILE_EXT\"" > reassemble.sh
+            # Windows reassemble
             echo "@echo off" > reassemble.bat
-            echo "copy /b part_* \"$TITLE.$EXT\"" >> reassemble.bat
+            echo "copy /b part_* \"$TITLE.$FILE_EXT\"" >> reassemble.bat
             
             cd ..
-            
-            # Zip everything and move to the final downloads folder
             zip -j "downloads/${TITLE}.zip" "work_$TITLE/"*
             rm -rf "work_$TITLE"
           done
@@ -94,5 +94,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
           git add downloads/
-          git commit -m "Uploaded requested videos" || exit 0
+          git commit -m "Upload: $(date)" || exit 0
           git push
+
+      - name: Update Cookies Secret
+        uses: AnimMouse/setup-yt-dlp/cookies/update@v3
+        with:
+          cookies_secret_name: YOUTUBE_COOKIES
+          token: ${{ secrets.GH_PAT }}

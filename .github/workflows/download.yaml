@@ -1,23 +1,28 @@
-name: Download YouTube Video (Auto-Refresh Cookies)
+name: Download YouTube Videos (Multi-Download & Zip)
 on:
   workflow_dispatch:
     inputs:
-      video_url:
-        description: 'YouTube Video URL'
+      video_urls:
+        description: 'YouTube Video URLs (comma-separated for multiple)'
         required: true
       quality:
-        description: 'Video Height (e.g., 1080, 720, 480)'
+        description: 'Video Height (e.g., 1080, 720, 480) - Ignored if Audio Only'
         required: true
         default: '720'
-      filename_override:
-        description: 'Optional: Custom output filename (without extension). If left empty, title will be used.'
+      download_audio_only:
+        description: 'Download Audio Only?'
+        type: boolean
+        default: false
+      filename_prefix:
+        description: 'Optional: Prefix for filenames'
         required: false
         default: ''
+
 permissions:
   contents: write
 
 jobs:
-  download-and-commit:
+  download-process:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -31,69 +36,75 @@ jobs:
         with:
           cookies: ${{ secrets.YOUTUBE_COOKIES }}
 
-      - name: Extract Video Title
-        id: extract_title
-        run: |
-          RAW_TITLE=$(yt-dlp --skip-download --print title "${{ github.event.inputs.video_url }}")
-          if [ -n "${{ github.event.inputs.filename_override }}" ]; then
-            FINAL_FILENAME="${{ github.event.inputs.filename_override }}"
-          else
-            FINAL_FILENAME=$(echo "$RAW_TITLE" | sed 's/[:\/\\*?"<>|]/_/g' | tr ' ' '_')
-          fi
-          echo "filename=$FINAL_FILENAME" >> $GITHUB_OUTPUT
+      - name: Create Downloads Folder
+        run: mkdir -p downloads
 
-      - name: Reset videos folder (Fresh Start)
+      - name: Process Videos
         run: |
-          rm -rf videos
-          mkdir -p videos
-
-      - name: Download video (Custom Quality)
-        run: |
-          QUALITY_HEIGHT="${{ github.event.inputs.quality }}"
-          yt-dlp -f "best[height<=${QUALITY_HEIGHT}]" \
-                 --downloader native \
-                 -o "videos/${{ steps.extract_title.outputs.filename }}.%(ext)s" \
-                 "${{ github.event.inputs.video_url }}"
-
-      - name: Split video into chunks
-        run: |
-          cd videos
-          FINAL_NAME="${{ steps.extract_title.outputs.filename }}"
+          # Convert comma-separated string into an array
+          IFS=',' read -ra ADDR <<< "${{ github.event.inputs.video_urls }}"
           
-          if [ -f "${FINAL_NAME}.mp4" ]; then
-            ORIGINAL="${FINAL_NAME}.mp4"
-            EXT="mp4"
-          elif [ -f "${FINAL_NAME}.mkv" ]; then
-            ORIGINAL="${FINAL_NAME}.mkv"
-            EXT="mkv"
-          elif [ -f "${FINAL_NAME}.webm" ]; then
-            ORIGINAL="${FINAL_NAME}.webm"
-            EXT="webm"
-          else
-            echo "No video file found to split."
-            exit 1
-          fi
+          for url in "${ADDR[@]}"; do
+            url=$(echo "$url" | xargs) # trim whitespace
+            echo "Processing: $url"
+            
+            # 1. Get Title and Format
+            RAW_TITLE=$(yt-dlp --skip-download --get-title "$url")
+            CLEAN_TITLE=$(echo "$RAW_TITLE" | sed 's/[:\/\\*?"<>|]/_/g' | tr ' ' '_')
+            
+            # Set Format and Extension
+            if [ "${{ github.event.inputs.download_audio_only }}" = "true" ]; then
+              FORMAT="bestaudio"
+              EXT="mp3"
+            else
+              FORMAT="best[height<=${{ github.event.inputs.quality }}]"
+              EXT="mp4"
+            fi
+            
+            # 2. Create temp workspace for this specific video
+            mkdir -p "temp_$CLEAN_TITLE"
+            
+            # 3. Download
+            yt-dlp -f "$FORMAT" \
+                   --downloader native \
+                   --extract-audio --audio-format "$EXT" --audio-quality 0 \
+                   --add-metadata \
+                   -o "temp_$CLEAN_TITLE/original.$EXT" \
+                   "$url" || true # Continue even if one fails
+            
+            # Identify the actual file (yt-dlp might change extension)
+            DOWNLOADED_FILE=$(find "temp_$CLEAN_TITLE" -type f | head -n 1)
+            ACTUAL_EXT="${DOWNLOADED_FILE##*.}"
+            
+            # 4. Split into chunks (95MB)
+            cd "temp_$CLEAN_TITLE"
+            split -b 95M "original.$ACTUAL_EXT" "part_"
+            rm "original.$ACTUAL_EXT"
+            
+            # 5. Create Reassembly Scripts
+            # Linux/Mac
+            echo -e "#!/bin/bash\ncat part_* > \"$CLEAN_TITLE.$ACTUAL_EXT\"\necho 'Video Reassembled!'" > reassemble.sh
+            chmod +x reassemble.sh
+            # Windows
+            echo -e "@echo off\ncopy /b part_* \"$CLEAN_TITLE.$ACTUAL_EXT\"\necho Video Reassembled!" > reassemble.bat
+            
+            cd ..
+            
+            # 6. Zip it up and move to downloads
+            zip -j "downloads/${CLEAN_TITLE}.zip" "temp_$CLEAN_TITLE/"*
+            
+            # Cleanup temp
+            rm -rf "temp_$CLEAN_TITLE"
+          done
 
-          split -b 95M "$ORIGINAL" "${FINAL_NAME}_part_"
-          rm "$ORIGINAL"
-          
-          echo '#!/bin/bash' > reassemble.sh
-          echo "cat ${FINAL_NAME}_part_* > ${FINAL_NAME}.${EXT}" >> reassemble.sh
-          echo 'echo "Reassembled: ${FINAL_NAME}.${EXT}"' >> reassemble.sh
-          chmod +x reassemble.sh
-          
-          cd ..
-
-      - name: Commit and push chunks
+      - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
-          
-          # Always add, commit, and push. Git will handle "nothing to commit" gracefully.
-          git add videos/
-          git commit -m "Add video: ${{ steps.extract_title.outputs.filename }} (split)" || echo "No changes to commit"
+          git add downloads/
+          git commit -m "Add videos: ${{ github.event.inputs.video_urls }}" || echo "No changes"
           git push
-          
+
       - name: Update yt-dlp YouTube cookies
         uses: AnimMouse/setup-yt-dlp/cookies/update@v3
         with:

@@ -72,7 +72,6 @@ jobs:
           EXT="${{ env.EXTENSION }}"
           FILE="temp_file.${EXT}"
           
-          # Verify download succeeded
           if [ ! -f "$FILE" ]; then
             echo "ERROR: Downloaded file not found: $FILE"
             ls -la
@@ -91,20 +90,16 @@ jobs:
             split -b 95M "full_media.${EXT}" "${TITLE}_part_"
             rm "full_media.${EXT}"
             
-            # Windows BAT merge script
-            cat > merge.bat <<EOF
-@echo off
-echo Reassembling $TITLE...
-copy /b ${TITLE}_part_* "$TITLE.$EXT"
-echo Done!
-pause
-EOF
+            # Windows BAT merge script (no heredoc)
+            echo '@echo off' > merge.bat
+            echo "echo Reassembling $TITLE..." >> merge.bat
+            echo "copy /b ${TITLE}_part_* \"$TITLE.$EXT\"" >> merge.bat
+            echo "echo Done!" >> merge.bat
+            echo "pause" >> merge.bat
             
             # Linux Bash reassemble script
-            cat > reassemble.sh <<EOF
-#!/bin/bash
-cat ${TITLE}_part_* > "$TITLE.$EXT"
-EOF
+            echo '#!/bin/bash' > reassemble.sh
+            echo "cat ${TITLE}_part_* > \"$TITLE.$EXT\"" >> reassemble.sh
             chmod +x reassemble.sh
           else
             mv "full_media.${EXT}" "$TITLE.$EXT"

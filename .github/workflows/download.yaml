@@ -1,99 +1,111 @@
-name: YT-DLP Downloader
+name: YT-DLP Smart Downloader
+
 on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: 'YouTube URL'
+        description: 'YouTube Video URL'
         required: true
       quality:
         description: 'Max Resolution'
         required: true
-        default: '1080'
+        default: '720'
         type: choice
-        options: ['2160', '1440', '1080', '720', '480']
+        options: ['1080', '720', '480']
       audio_only:
         description: 'Download Audio Only?'
         required: true
         type: boolean
         default: false
 
+permissions:
+  contents: write
+
 jobs:
-  download:
+  download-and-commit:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GH_PAT }}
 
-      - name: Install yt-dlp & FFmpeg
-        run: |
-          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-          sudo chmod a+rx /usr/local/bin/yt-dlp
-          sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Setup yt-dlp
+        uses: AnimMouse/setup-yt-dlp@v3
 
-      - name: Setup Cookies
-        run: echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
+      - name: Setup yt-dlp YouTube cookies
+        uses: AnimMouse/setup-yt-dlp/cookies@v3
+        with:
+          cookies: ${{ secrets.YOUTUBE_COOKIES }}
 
       - name: Download Media
-        id: dl
         run: |
-          # Define format based on input
+          mkdir -p download
+          # Set format based on audio_only input
           if [ "${{ github.event.inputs.audio_only }}" = "true" ]; then
             FORMAT="bestaudio/best"
             EXT="mp3"
           else
-            FORMAT="bestvideo[height<=${{ github.event.inputs.quality }}]+bestaudio/best[height<=${{ github.event.inputs.quality }}]"
+            FORMAT="best[height<=${{ github.event.inputs.quality }}]"
             EXT="mp4"
           fi
-
-          # Download and get filename
-          yt-dlp --cookies cookies.txt -f "$FORMAT" --merge-output-format mp4 -o "raw_file.%(ext)s" "${{ github.event.inputs.video_url }}"
-          TITLE=$(yt-dlp --get-title --restrict-filenames "${{ github.event.inputs.video_url }}")
-          echo "TITLE=$TITLE" >> $GITHUB_ENV
           
-          # Move to a clean name
-          mv raw_file.* "target_file.$EXT"
+          # Download using restricted filenames to avoid shell errors
+          yt-dlp -f "$FORMAT" \
+                 --downloader native \
+                 --restrict-filenames \
+                 -o "download/temp_file.%(ext)s" \
+                 "${{ github.event.inputs.video_url }}"
+          
+          # Get clean title for folder naming
+          CLEAN_TITLE=$(yt-dlp --get-title --restrict-filenames "${{ github.event.inputs.video_url }}")
+          echo "CLEAN_TITLE=$CLEAN_TITLE" >> $GITHUB_ENV
+          echo "EXTENSION=$EXT" >> $GITHUB_ENV
 
-      - name: Split and Generate BAT
+      - name: Process and Split
         run: |
-          mkdir -p "download/${{ env.TITLE }}"
-          FILE=$(ls target_file.*)
-          SIZE=$(stat -c%s "$FILE")
-          LIMIT=$((95 * 1024 * 1024))
-
-          if [ $SIZE -gt $LIMIT ]; then
-            echo "Large file detected. Splitting..."
-            split -b 95M "$FILE" "download/${{ env.TITLE }}/part_"
+          cd download
+          TITLE="${{ env.CLEAN_TITLE }}"
+          EXT="${{ env.EXTENSION }}"
+          FILE="temp_file.$EXT"
+          
+          if [ -f "$FILE" ]; then
+            mkdir -p "$TITLE"
+            mv "$FILE" "$TITLE/full_media.$EXT"
+            cd "$TITLE"
             
-            # Create Windows BAT file for merging
-            cat <<EOF > "download/${{ env.TITLE }}/merge.bat"
-          @echo off
-          echo Merging parts for ${{ env.TITLE }}...
-          copy /b part_* "restored_${{ env.TITLE }}.${FILE##*.}"
-          echo Done!
-          pause
-          EOF
-            
-            # Zip the folder
-            zip -r "download/${{ env.TITLE }}.zip" "download/${{ env.TITLE }}"
-            rm -rf "download/${{ env.TITLE }}"
-          else
-            echo "File is small. Moving directly."
-            mv "$FILE" "download/${{ env.TITLE }}.${FILE##*.}"
+            # Split if larger than 95MB
+            SIZE=$(stat -c%s "full_media.$EXT")
+            if [ $SIZE -gt 99614720 ]; then
+              split -b 95M "full_media.$EXT" "${TITLE}_part_"
+              rm "full_media.$EXT"
+              
+              # Create Windows BAT merge script
+              echo "@echo off" > merge.bat
+              echo "echo Reassembling $TITLE..." >> merge.bat
+              echo "copy /b ${TITLE}_part_* \"$TITLE.$EXT\"" >> merge.bat
+              echo "echo Done!" >> merge.bat
+              echo "pause" >> merge.bat
+              
+              # Create Linux Bash reassemble script
+              echo "#!/bin/bash" > reassemble.sh
+              echo "cat ${TITLE}_part_* > \"$TITLE.$EXT\"" >> reassemble.sh
+              chmod +x reassemble.sh
+            else
+              mv "full_media.$EXT" "$TITLE.$EXT"
+            fi
           fi
 
-      - name: Update Cookies (AnimMouse Logic)
-        run: |
-          # Here you would call the specific script from the AnimMouse/setup-yt-dlp repo
-          # to refresh the cookies.txt if the repo provides a refresh utility.
-          # For now, we ensure the current secret is updated in the file.
-          echo "Updating cookie state in repo..."
+      - name: Update yt-dlp YouTube cookies
+        uses: AnimMouse/setup-yt-dlp/cookies/update@v3
+        with:
+          cookies_secret_name: YOUTUBE_COOKIES
+          token: ${{ secrets.GH_PAT }}
 
-      - name: Push to Repository
+      - name: Commit and push
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add download/ cookies.txt
-          git commit -m "Add download: ${{ env.TITLE }}" || echo "No changes to commit"
+          git config user.name "github-actions[bot]"
+          git config user.email "actions@github.com"
+          git add download/
+          git commit -m "Add ${{ env.CLEAN_TITLE }}" || echo "No changes"
           git push

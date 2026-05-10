@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   download-and-commit:
-    runs-on: depot-ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

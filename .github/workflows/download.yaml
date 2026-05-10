@@ -1,4 +1,38 @@
-# 2. Get and Sanitize Title (Improved bypass)
+name: YT-DLP Smart Downloader (High Speed)
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'YouTube Video URL'
+        required: true
+      quality:
+        description: 'Max Resolution'
+        required: true
+        default: '720'
+        type: choice
+        options: ['1080', '720', '480']
+      audio_only:
+        description: 'Download Audio Only?'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-commit:
+    runs-on: self-hosted
+    steps:
+      # 1. Fast Checkout (Skips heavy cleaning and deep history)
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: false
+
+      # 2. Get and Sanitize Title (Improved bypass)
       - name: Get and Sanitize Title
         id: meta
         run: |
@@ -32,3 +66,33 @@
                    "${{ github.event.inputs.video_url }}"
             echo "EXT=mp4" >> $GITHUB_ENV
           fi
+
+      # 4. Instant Local Split (Bypasses GitHub's 100MB file limit)
+      - name: Process and Split
+        run: |
+          TITLE="${{ steps.meta.outputs.title }}"
+          EXT="${{ env.EXT }}"
+          cd "download/$TITLE"
+          
+          SIZE=$(stat -c%s "full_media.$EXT")
+          
+          if [ $SIZE -gt 99614720 ]; then
+            # File > 95MB: Split into chunks for Git compatibility
+            split -b 95M "full_media.$EXT" "vid_part_"
+            rm "full_media.$EXT"
+            # Create a simple reassemble script for later use
+            printf "#!/bin/bash\ncat vid_part_* > \"$TITLE.$EXT\" && rm -f vid_part_*" > reassemble.sh
+            chmod +x reassemble.sh
+          else
+            # File is small enough to keep whole
+            mv "full_media.$EXT" "$TITLE.$EXT"
+          fi
+
+      # 5. Commit and Push back to Repo
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "actions@github.com"
+          git add download/
+          git commit -m "Add ${{ steps.meta.outputs.title }}" || exit 0
+          git push

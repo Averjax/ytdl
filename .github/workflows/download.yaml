@@ -51,6 +51,7 @@ jobs:
             # Audio: High speed extract
             yt-dlp -x --audio-format mp3 \
                    --restrict-filenames \
+                   --cookies /home/github/cookies.txt \
                    -o "full_media.mp3" \
                    "${{ github.event.inputs.video_url }}"
             EXT="mp3"

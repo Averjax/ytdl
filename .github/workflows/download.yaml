@@ -1,4 +1,4 @@
-name: YT-DLP Smart Downloader (High Speed)
+name: YT-DLP Smart Downloader
 
 on:
   workflow_dispatch:
@@ -23,76 +23,94 @@ permissions:
 
 jobs:
   download-and-commit:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
-      # 1. Fast Checkout (Skips heavy cleaning and deep history)
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup yt-dlp
+        uses: AnimMouse/setup-yt-dlp@v3
+
+      - name: Setup yt-dlp YouTube cookies
+        uses: AnimMouse/setup-yt-dlp/cookies@v3
         with:
-          fetch-depth: 1
-          clean: false
+          cookies: ${{ secrets.YOUTUBE_COOKIES }}
 
-      # 2. Get and Sanitize Title (Improved bypass)
-      - name: Get and Sanitize Title
-        id: meta
-        run: |
-          RAW_TITLE=$(yt-dlp --get-title \
-            --restrict-filenames \
-            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-            --cookies /home/github/cookies.txt \
-            "${{ github.event.inputs.video_url }}")
-          CLEAN_TITLE=$(echo "$RAW_TITLE" | sed 's/[\\/:*?"<>|]/_/g' | sed 's/[ .]$//')
-          echo "title=$CLEAN_TITLE" >> $GITHUB_OUTPUT
-
-      # 3. Download Media (Added client impersonation)
       - name: Download Media
         run: |
-          mkdir -p "download/${{ steps.meta.outputs.title }}"
-          cd "download/${{ steps.meta.outputs.title }}"
-          
-          # COMMON ARGS to bypass bot detection
-          BYPASS_ARGS='--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --cookies /home/github/cookies.txt --extractor-args "youtube:player_client=web,ios"'
-
+          mkdir -p download
           if [ "${{ github.event.inputs.audio_only }}" = "true" ]; then
-            yt-dlp -x --audio-format mp3 $BYPASS_ARGS \
-                   --restrict-filenames -o "full_media.mp3" \
+            # Audio only: extract as MP3
+            yt-dlp -x --audio-format mp3 \
+                   --restrict-filenames \
+                   -o "download/temp_file.mp3" \
                    "${{ github.event.inputs.video_url }}"
-            echo "EXT=mp3" >> $GITHUB_ENV
+            EXT="mp3"
           else
-            # Changed format filter to be more flexible to avoid "Requested format not available"
-            yt-dlp -f "bestvideo[height<=${{ github.event.inputs.quality }}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${{ github.event.inputs.quality }}]" \
-                   --remux-video mp4 $BYPASS_ARGS \
-                   --restrict-filenames -o "full_media.mp4" \
+            # Video: remux to MP4
+            yt-dlp -f "best[height<=${{ github.event.inputs.quality }}]" \
+                   --remux-video mp4 \
+                   --restrict-filenames \
+                   -o "download/temp_file.mp4" \
                    "${{ github.event.inputs.video_url }}"
-            echo "EXT=mp4" >> $GITHUB_ENV
+            EXT="mp4"
           fi
+          echo "EXTENSION=$EXT" >> $GITHUB_ENV
 
-      # 4. Instant Local Split (Bypasses GitHub's 100MB file limit)
+      - name: Get clean video title
+        run: |
+          CLEAN_TITLE=$(yt-dlp --get-title --restrict-filenames "${{ github.event.inputs.video_url }}")
+          echo "CLEAN_TITLE=$CLEAN_TITLE" >> $GITHUB_ENV
+
+      - name: Sanitize title for Windows compatibility
+        run: |
+          # Replace characters invalid on Windows: \ / : * ? " < > |
+          SANITIZED_TITLE=$(echo "${{ env.CLEAN_TITLE }}" | sed 's/[\\/:*?"<>|]/_/g')
+          # Also remove trailing spaces or dots
+          SANITIZED_TITLE=$(echo "$SANITIZED_TITLE" | sed 's/[ .]$//')
+          echo "SANITIZED_TITLE=$SANITIZED_TITLE" >> $GITHUB_ENV
+          echo "Sanitized title: $SANITIZED_TITLE"
+
       - name: Process and Split
         run: |
-          TITLE="${{ steps.meta.outputs.title }}"
-          EXT="${{ env.EXT }}"
-          cd "download/$TITLE"
+          cd download
+          TITLE="${{ env.SANITIZED_TITLE }}"
+          EXT="${{ env.EXTENSION }}"
+          FILE="temp_file.${EXT}"
           
-          SIZE=$(stat -c%s "full_media.$EXT")
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: Downloaded file not found: $FILE"
+            ls -la
+            exit 1
+          fi
+          
+          mkdir -p "$TITLE"
+          mv "$FILE" "$TITLE/full_media.${EXT}"
+          cd "$TITLE"
+          
+          SIZE=$(stat -c%s "full_media.${EXT}")
+          echo "File size: $SIZE bytes"
           
           if [ $SIZE -gt 99614720 ]; then
-            # File > 95MB: Split into chunks for Git compatibility
-            split -b 95M "full_media.$EXT" "vid_part_"
-            rm "full_media.$EXT"
-            # Create a simple reassemble script for later use
-            printf "#!/bin/bash\ncat vid_part_* > \"$TITLE.$EXT\" && rm -f vid_part_*" > reassemble.sh
+            echo "File exceeds 95MB, splitting..."
+            split -b 95M "full_media.${EXT}" "vid_part_"
+            rm "full_media.${EXT}"
+            
+            # Linux Bash reassemble script
+            echo '#!/bin/bash' > reassemble.sh
+            echo "cat vid_part_* > \"$TITLE.$EXT\" && rm -f vid_part_*" >> reassemble.sh
             chmod +x reassemble.sh
           else
-            # File is small enough to keep whole
-            mv "full_media.$EXT" "$TITLE.$EXT"
+            mv "full_media.${EXT}" "$TITLE.$EXT"
           fi
+          
+          echo "Final files in $(pwd):"
+          ls -la
 
-      # 5. Commit and Push back to Repo
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
           git add download/
-          git commit -m "Add ${{ steps.meta.outputs.title }}" || exit 0
+          git commit -m "Add ${{ env.SANITIZED_TITLE }}" || echo "No changes to commit"
           git push

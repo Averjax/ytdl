@@ -25,48 +25,44 @@ jobs:
   download-and-commit:
     runs-on: self-hosted
     steps:
-      # 1. Fast Checkout (No history)
+      # 1. Fast Checkout (Skips heavy cleaning and deep history)
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1 
-          clean: false 
+          fetch-depth: 1
+          clean: false
 
-      # 2. Get Title First (Fastest way to check for duplicates)
+      # 2. Get and Sanitize Title (Uses cookies to bypass bot checks)
       - name: Get and Sanitize Title
         id: meta
         run: |
-          RAW_TITLE=$(yt-dlp --get-title --restrict-filenames "${{ github.event.inputs.video_url }}")
-          # Sanitize for Windows/Linux safety
+          RAW_TITLE=$(yt-dlp --get-title --restrict-filenames --cookies /home/github/cookies.txt "${{ github.event.inputs.video_url }}")
+          # Remove characters that break Windows or Linux filesystems
           CLEAN_TITLE=$(echo "$RAW_TITLE" | sed 's/[\\/:*?"<>|]/_/g' | sed 's/[ .]$//')
           echo "title=$CLEAN_TITLE" >> $GITHUB_OUTPUT
-          
-      # 3. Download Media (Optimized for speed)
+
+      # 3. Download Media (Directly uses server-installed yt-dlp & ffmpeg)
       - name: Download Media
         run: |
           mkdir -p "download/${{ steps.meta.outputs.title }}"
           cd "download/${{ steps.meta.outputs.title }}"
           
           if [ "${{ github.event.inputs.audio_only }}" = "true" ]; then
-            # Audio: High speed extract
-            yt-dlp -x --audio-format mp3 \
-                   --restrict-filenames \
-                   --cookies /home/github/cookies.txt \
-                   -o "full_media.mp3" \
+            # High-speed MP3 extraction
+            yt-dlp -x --audio-format mp3 --cookies /home/github/cookies.txt \
+                   --restrict-filenames -o "full_media.mp3" \
                    "${{ github.event.inputs.video_url }}"
-            EXT="mp3"
+            echo "EXT=mp3" >> $GITHUB_ENV
           else
-            # Video: Use --format-sort for faster resolution picking
+            # Optimized video pick + remux to MP4
             yt-dlp -f "bestvideo[height<=${{ github.event.inputs.quality }}]+bestaudio/best[height<=${{ github.event.inputs.quality }}]" \
-                   --remux-video mp4 \
-                   --restrict-filenames \
-                   -o "full_media.mp4" \
+                   --remux-video mp4 --cookies /home/github/cookies.txt \
+                   --restrict-filenames -o "full_media.mp4" \
                    "${{ github.event.inputs.video_url }}"
-            EXT="mp4"
+            echo "EXT=mp4" >> $GITHUB_ENV
           fi
-          echo "EXT=$EXT" >> $GITHUB_ENV
 
-      # 4. Instant Split (Using the local filesystem)
+      # 4. Instant Local Split (Bypasses GitHub's 100MB file limit)
       - name: Process and Split
         run: |
           TITLE="${{ steps.meta.outputs.title }}"
@@ -76,22 +72,22 @@ jobs:
           SIZE=$(stat -c%s "full_media.$EXT")
           
           if [ $SIZE -gt 99614720 ]; then
-            # 95MB split
+            # File > 95MB: Split into chunks for Git compatibility
             split -b 95M "full_media.$EXT" "vid_part_"
             rm "full_media.$EXT"
-            # Faster reassemble script creation
+            # Create a simple reassemble script for later use
             printf "#!/bin/bash\ncat vid_part_* > \"$TITLE.$EXT\" && rm -f vid_part_*" > reassemble.sh
             chmod +x reassemble.sh
           else
+            # File is small enough to keep whole
             mv "full_media.$EXT" "$TITLE.$EXT"
           fi
 
-      # 5. Fast Push
+      # 5. Commit and Push back to Repo
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
           git add download/
           git commit -m "Add ${{ steps.meta.outputs.title }}" || exit 0
-          # Using --force or retry logic is often better on self-hosted
           git push

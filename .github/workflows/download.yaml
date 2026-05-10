@@ -1,93 +1,34 @@
-name: YT-DLP Smart Downloader (High Speed)
-
-on:
-  workflow_dispatch:
-    inputs:
-      video_url:
-        description: 'YouTube Video URL'
-        required: true
-      quality:
-        description: 'Max Resolution'
-        required: true
-        default: '720'
-        type: choice
-        options: ['1080', '720', '480']
-      audio_only:
-        description: 'Download Audio Only?'
-        required: true
-        type: boolean
-        default: false
-
-permissions:
-  contents: write
-
-jobs:
-  download-and-commit:
-    runs-on: self-hosted
-    steps:
-      # 1. Fast Checkout (Skips heavy cleaning and deep history)
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          clean: false
-
-      # 2. Get and Sanitize Title (Uses cookies to bypass bot checks)
+# 2. Get and Sanitize Title (Improved bypass)
       - name: Get and Sanitize Title
         id: meta
         run: |
-          RAW_TITLE=$(yt-dlp --get-title --restrict-filenames --cookies /home/github/cookies.txt "${{ github.event.inputs.video_url }}")
-          # Remove characters that break Windows or Linux filesystems
+          RAW_TITLE=$(yt-dlp --get-title \
+            --restrict-filenames \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            --cookies /home/github/cookies.txt \
+            "${{ github.event.inputs.video_url }}")
           CLEAN_TITLE=$(echo "$RAW_TITLE" | sed 's/[\\/:*?"<>|]/_/g' | sed 's/[ .]$//')
           echo "title=$CLEAN_TITLE" >> $GITHUB_OUTPUT
 
-      # 3. Download Media (Directly uses server-installed yt-dlp & ffmpeg)
+      # 3. Download Media (Added client impersonation)
       - name: Download Media
         run: |
           mkdir -p "download/${{ steps.meta.outputs.title }}"
           cd "download/${{ steps.meta.outputs.title }}"
           
+          # COMMON ARGS to bypass bot detection
+          BYPASS_ARGS='--user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --cookies /home/github/cookies.txt --extractor-args "youtube:player_client=web,ios"'
+
           if [ "${{ github.event.inputs.audio_only }}" = "true" ]; then
-            # High-speed MP3 extraction
-            yt-dlp -x --audio-format mp3 --cookies /home/github/cookies.txt \
+            yt-dlp -x --audio-format mp3 $BYPASS_ARGS \
                    --restrict-filenames -o "full_media.mp3" \
                    "${{ github.event.inputs.video_url }}"
             echo "EXT=mp3" >> $GITHUB_ENV
           else
-            # Optimized video pick + remux to MP4
-            yt-dlp -f "bestvideo[height<=${{ github.event.inputs.quality }}]+bestaudio/best[height<=${{ github.event.inputs.quality }}]" \
-                   --remux-video mp4 --cookies /home/github/cookies.txt \
+            # Changed format filter to be more flexible to avoid "Requested format not available"
+            yt-dlp -f "bestvideo[height<=${{ github.event.inputs.quality }}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${{ github.event.inputs.quality }}]" \
+                   --remux-video mp4 $BYPASS_ARGS \
                    --restrict-filenames -o "full_media.mp4" \
                    "${{ github.event.inputs.video_url }}"
             echo "EXT=mp4" >> $GITHUB_ENV
           fi
-
-      # 4. Instant Local Split (Bypasses GitHub's 100MB file limit)
-      - name: Process and Split
-        run: |
-          TITLE="${{ steps.meta.outputs.title }}"
-          EXT="${{ env.EXT }}"
-          cd "download/$TITLE"
-          
-          SIZE=$(stat -c%s "full_media.$EXT")
-          
-          if [ $SIZE -gt 99614720 ]; then
-            # File > 95MB: Split into chunks for Git compatibility
-            split -b 95M "full_media.$EXT" "vid_part_"
-            rm "full_media.$EXT"
-            # Create a simple reassemble script for later use
-            printf "#!/bin/bash\ncat vid_part_* > \"$TITLE.$EXT\" && rm -f vid_part_*" > reassemble.sh
-            chmod +x reassemble.sh
-          else
-            # File is small enough to keep whole
-            mv "full_media.$EXT" "$TITLE.$EXT"
-          fi
-
-      # 5. Commit and Push back to Repo
-      - name: Commit and push
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "actions@github.com"
-          git add download/
-          git commit -m "Add ${{ steps.meta.outputs.title }}" || exit 0
-          git push

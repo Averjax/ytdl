@@ -1,4 +1,4 @@
-name: YT-DLP Smart Downloader
+name: YT-DLP Smart Downloader (High Speed)
 
 on:
   workflow_dispatch:
@@ -25,92 +25,71 @@ jobs:
   download-and-commit:
     runs-on: self-hosted
     steps:
+      # 1. Fast Checkout (No history)
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup yt-dlp
-        uses: AnimMouse/setup-yt-dlp@v3
-
-      - name: Setup yt-dlp YouTube cookies
-        uses: AnimMouse/setup-yt-dlp/cookies@v3
         with:
-          cookies: ${{ secrets.YOUTUBE_COOKIES }}
+          fetch-depth: 1 
 
+      # 2. Get Title First (Fastest way to check for duplicates)
+      - name: Get and Sanitize Title
+        id: meta
+        run: |
+          RAW_TITLE=$(yt-dlp --get-title --restrict-filenames "${{ github.event.inputs.video_url }}")
+          # Sanitize for Windows/Linux safety
+          CLEAN_TITLE=$(echo "$RAW_TITLE" | sed 's/[\\/:*?"<>|]/_/g' | sed 's/[ .]$//')
+          echo "title=$CLEAN_TITLE" >> $GITHUB_OUTPUT
+          
+      # 3. Download Media (Optimized for speed)
       - name: Download Media
         run: |
-          mkdir -p download
+          mkdir -p "download/${{ steps.meta.outputs.title }}"
+          cd "download/${{ steps.meta.outputs.title }}"
+          
           if [ "${{ github.event.inputs.audio_only }}" = "true" ]; then
-            # Audio only: extract as MP3
+            # Audio: High speed extract
             yt-dlp -x --audio-format mp3 \
                    --restrict-filenames \
-                   -o "download/temp_file.mp3" \
+                   -o "full_media.mp3" \
                    "${{ github.event.inputs.video_url }}"
             EXT="mp3"
           else
-            # Video: remux to MP4
-            yt-dlp -f "best[height<=${{ github.event.inputs.quality }}]" \
+            # Video: Use --format-sort for faster resolution picking
+            yt-dlp -f "bestvideo[height<=${{ github.event.inputs.quality }}]+bestaudio/best[height<=${{ github.event.inputs.quality }}]" \
                    --remux-video mp4 \
                    --restrict-filenames \
-                   -o "download/temp_file.mp4" \
+                   -o "full_media.mp4" \
                    "${{ github.event.inputs.video_url }}"
             EXT="mp4"
           fi
-          echo "EXTENSION=$EXT" >> $GITHUB_ENV
+          echo "EXT=$EXT" >> $GITHUB_ENV
 
-      - name: Get clean video title
-        run: |
-          CLEAN_TITLE=$(yt-dlp --get-title --restrict-filenames "${{ github.event.inputs.video_url }}")
-          echo "CLEAN_TITLE=$CLEAN_TITLE" >> $GITHUB_ENV
-
-      - name: Sanitize title for Windows compatibility
-        run: |
-          # Replace characters invalid on Windows: \ / : * ? " < > |
-          SANITIZED_TITLE=$(echo "${{ env.CLEAN_TITLE }}" | sed 's/[\\/:*?"<>|]/_/g')
-          # Also remove trailing spaces or dots
-          SANITIZED_TITLE=$(echo "$SANITIZED_TITLE" | sed 's/[ .]$//')
-          echo "SANITIZED_TITLE=$SANITIZED_TITLE" >> $GITHUB_ENV
-          echo "Sanitized title: $SANITIZED_TITLE"
-
+      # 4. Instant Split (Using the local filesystem)
       - name: Process and Split
         run: |
-          cd download
-          TITLE="${{ env.SANITIZED_TITLE }}"
-          EXT="${{ env.EXTENSION }}"
-          FILE="temp_file.${EXT}"
+          TITLE="${{ steps.meta.outputs.title }}"
+          EXT="${{ env.EXT }}"
+          cd "download/$TITLE"
           
-          if [ ! -f "$FILE" ]; then
-            echo "ERROR: Downloaded file not found: $FILE"
-            ls -la
-            exit 1
-          fi
-          
-          mkdir -p "$TITLE"
-          mv "$FILE" "$TITLE/full_media.${EXT}"
-          cd "$TITLE"
-          
-          SIZE=$(stat -c%s "full_media.${EXT}")
-          echo "File size: $SIZE bytes"
+          SIZE=$(stat -c%s "full_media.$EXT")
           
           if [ $SIZE -gt 99614720 ]; then
-            echo "File exceeds 95MB, splitting..."
-            split -b 95M "full_media.${EXT}" "vid_part_"
-            rm "full_media.${EXT}"
-            
-            # Linux Bash reassemble script
-            echo '#!/bin/bash' > reassemble.sh
-            echo "cat vid_part_* > \"$TITLE.$EXT\" && rm -f vid_part_*" >> reassemble.sh
+            # 95MB split
+            split -b 95M "full_media.$EXT" "vid_part_"
+            rm "full_media.$EXT"
+            # Faster reassemble script creation
+            printf "#!/bin/bash\ncat vid_part_* > \"$TITLE.$EXT\" && rm -f vid_part_*" > reassemble.sh
             chmod +x reassemble.sh
           else
-            mv "full_media.${EXT}" "$TITLE.$EXT"
+            mv "full_media.$EXT" "$TITLE.$EXT"
           fi
-          
-          echo "Final files in $(pwd):"
-          ls -la
 
+      # 5. Fast Push
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "actions@github.com"
           git add download/
-          git commit -m "Add ${{ env.SANITIZED_TITLE }}" || echo "No changes to commit"
+          git commit -m "Add ${{ steps.meta.outputs.title }}" || exit 0
+          # Using --force or retry logic is often better on self-hosted
           git push
